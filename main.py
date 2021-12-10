@@ -1,6 +1,7 @@
 from configparser import ConfigParser
 import re
 import datetime
+import time
 
 from requests import Timeout
 
@@ -52,9 +53,9 @@ smiles = {
 class MessageHandler(MessageHandlerAbs):
     @staticmethod
     def new_user(user, bot):
-        bot.data["users"].append(user.id)
+        bot.data["users"].append(str(user.id))
 
-        if user.id not in bot.data["admins"]:
+        if str(user.id) not in bot.data["admins"]:
             user.send("Салют! Присоединяйтесь к ежегодной игре тайного санты. "
                       "Каждый участник получит подарок, так как каждый участник "
                       "не только сам сможет стать сантой, но и у каждого из вас "
@@ -66,7 +67,12 @@ class MessageHandler(MessageHandlerAbs):
                       ]))
             user.data["stage"] = "start_idle"
         else:
-            user.send()
+            user.send("Приветствуем администратора", to_keyboard(["В меню" + smiles["back"]]))
+            user.data["stage"] = "start"
+
+    @staticmethod
+    def start(user, bot):
+        MessageHandler.open_menu(user, bot)
 
     @staticmethod
     def undefined_action(user, bot, open_menu=True):
@@ -99,7 +105,7 @@ class MessageHandler(MessageHandlerAbs):
     @staticmethod
     def blitz_birth(user, bot):
         try:
-            user.data["birth"] = parse_date(user.get())
+            user.data["birthdate"] = parse_date(user.get())
             user.data["stage"] = "blitz_hobby"
             user.send("Отлично, теперь расскажите немного о себе и о своих хобби (не более 100 символов)")
         except:
@@ -119,13 +125,59 @@ class MessageHandler(MessageHandlerAbs):
                   "Так же ваш тайный санта получит информаицю о вас) Никто не останется без внимания.")
 
     @staticmethod
+    def send_to_all_users(bot, message, keyboard=None, to_admins=False):
+        admins = bot.data["admins"]
+        users = bot.data["users"]
+        for user_id in users:
+            if to_admins and user_id not in admins:
+                continue
+            bot.load_user(user_id)
+            user = bot.get_users()[user_id]
+            if "notifies" in user.data:
+                continue
+
+            if keyboard:
+                user.send(message, keyboard)
+            else:
+                user.send(message)
+
+    @staticmethod
     def idle(user, bot):
         user.send("Дождитесь окончания периода регистрации 11 декабря")
 
     @staticmethod
     def open_menu(user, bot):
         user.data["stage"] = "menu"
-        user.send("", )
+        user.send("Меню", to_keyboard([
+            "Участники" + smiles["male"],
+            "Рассылка" + smiles["accept"]
+        ]))
+
+    @staticmethod
+    def menu(user, bot):
+        if smiles["back"] in user.get():
+            MessageHandler.open_menu(user, bot)
+        elif smiles["male"] in user.get():
+            for user_id in bot.data["users"]:
+                bot.load_user(user_id)
+                o_user = bot.get_users()[user_id]
+                if "active" in o_user.data and o_user.data["active"]:
+                    user.send(get_user_str(o_user), to_keyboard([("Исключить", o_user.id)]))
+        elif smiles["accept"] in user.get():
+            user.send("Введите сообщение для рассылки", to_keyboard(["В меню" + smiles["back"]]))
+            user.data["stage"] = "notify"
+        else:
+            MessageHandler.undefined_action(user, bot)
+
+    @staticmethod
+    def notify(user, bot):
+        if smiles["back"] not in user.get():
+            message = user.get()
+            MessageHandler.send_to_all_users(bot, message, keyboard=to_keyboard(
+                [("Отказаться от рассылки" + smiles["deny"], f"-")]
+                , inline=True))
+
+        MessageHandler.open_menu(user, bot)
 
     @staticmethod
     def access_deny(user, bot):
@@ -149,6 +201,24 @@ class MessageHandler(MessageHandlerAbs):
     @staticmethod
     def handle_click(user, update, bot):
         source = update.inner_source["data"]
+        if source == "-":
+            user.data["notifies"] = False
+            user.send("Вы отказались от рассылки")
+            return
+        if not source.startswith("+"):
+            bot.load_user(source)
+            user = bot.get_users()[source]
+            user.data["active"] = False
+            message = f"Администратор {user.id} исключил Санту: {source}"
+            MessageHandler.send_to_all_users(bot, message, to_keyboard([("Вернуть", f"+{source}")], inline=True),
+                                             to_admins=True)
+        else:
+            user_id = source[1:]
+            bot.load_user(user_id)
+            user = bot.get_users()[user_id]
+            user.data["active"] = True
+            message = f"Администратор {user.id} вернул Санту: {user_id}"
+            MessageHandler.send_to_all_users(bot, message, to_admins=True)
 
     @staticmethod
     def handle(user, update, bot):
@@ -158,8 +228,56 @@ class MessageHandler(MessageHandlerAbs):
             MessageHandler.handle_text(user, bot)
 
 
-def loop_function(bot):
+def get_age(birth):
+    now = datetime.datetime.now()
+    if birth > now:
+        return 0
+    diff = (now - birth).total_seconds()
+    if diff < 0:
+        diff = -diff + time.time()
+    return datetime.datetime.fromtimestamp(diff).year
+
+
+def get_user_str(user):
+    user_id = user.id
+    sex = user.data["sex"]
+    age = get_age(user.data["birthdate"])
+    hobby = user.data["hobby"]
+    return f"ID: {user_id}\nПол: {sex}\nВозраст: {age}\nХобби: {hobby}"
+
+
+def hail_if_birthday(user):
+    now = datetime.datetime.now()
+    birthday = user.data["birthdate"]
+    if now.month == birthday.month and now.day == birthday.day and now.hour + 2 == 13:
+        if "hail" not in user.data or not user.data["hail"]:
+            user.send("Поздравляем вас с днем рождения. В честь дня рождения в кофейни ждет ваш "
+                      "праздничный бестактный кофе. Действует при предъявлении паспорта.", keyboard=to_keyboard(
+                          [("Отказаться от рассылки" + smiles["deny"], f"-")], inline=True))
+            user.data["hail"] = True
+    else:
+        user.data["hail"] = False
+
+
+def switch(bot):
     pass
+
+
+def loop_function(bot):
+    users = bot.data["users"]
+    for user_id in users:
+        bot.load_user(user_id)
+        user = bot.get_users()[user_id]
+        if "birthdate" in user.data and "notifies" not in user.data:
+            hail_if_birthday(user)
+        if "hobby" not in user.data or "active" in user.data:
+            continue
+
+        message = f"Новый Санта:\n{get_user_str(user)}"
+        MessageHandler.send_to_all_users(bot, message, to_keyboard([("Исключить", f"{user.id}")],
+                                                                   inline=True), to_admins=True)
+        user.data["active"] = True
+        return
 
 
 def parse_date(datestr):
@@ -185,6 +303,8 @@ def main():
     bot.data["admins"] = admins
     if "users" not in bot.data:
         bot.data["users"] = []
+    if "step2" not in bot.data:
+        bot.data["step2"] = False
 
     while True:
         try:
